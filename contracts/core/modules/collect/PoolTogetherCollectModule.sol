@@ -46,6 +46,16 @@ interface ITWABDelegator {
         address delegatee,
         uint256 lockDuration) external returns (address);
 
+    // @notice Fund a delegation by transferring tickets from the caller to the delegation
+    // @param delegator Address of the delegator
+    // @param slot Slot of the delegation
+    // @param amount Amount of tickets to fund
+    function fundDelegation(
+        address,
+        uint256,
+        uint256
+    ) external returns (address);
+
     // @notice Withdraw tickets from a delegation.
     // @param delegatorAddress Address of the delegator
     // @param slot Slot of the delegation
@@ -73,14 +83,12 @@ interface IPrizePool {
 
 
 /**
- * @title FeeCollectModule
- * @author Lens Protocol
+ * @title PoolTogetherCollectModule
+ * @author NelsonRodMar.lens
  *
- * @notice This is a simple Lens CollectModule implementation, inheriting from the ICollectModule interface and
- * the FeeCollectModuleBase abstract contract.
+ * @notice This is a simple PoolTogether implementation in a Lens CollectModule, inheriting from the ICollectModule interface.
  *
- * This module works by allowing unlimited collects for a publication at a given price.
- */
+*/
 contract PoolTogetherCollectModule is FeeModuleBase, FollowValidationModuleBase, ICollectModule {
     using SafeERC20 for IERC20;
 
@@ -99,6 +107,8 @@ contract PoolTogetherCollectModule is FeeModuleBase, FollowValidationModuleBase,
     mapping(uint256 => mapping(uint256 => mapping(address => uint256))) public slotByAddress;
     // currency => PrizePool
     mapping(address => address) public prizePoolByCurrency;
+    // currency => ticket
+    mapping(address => address) public ticketByCurrency;
 
     /**
      * @dev This modifier reverts if the caller is not the configured governance address.
@@ -146,7 +156,8 @@ contract PoolTogetherCollectModule is FeeModuleBase, FollowValidationModuleBase,
         referralFee > BPS_MAX ||
         amount == 0 ||
         lockDuration == 0 ||
-        prizePoolByCurrency[currency] == address(0)
+        prizePoolByCurrency[currency] == address(0) ||
+        ticketByCurrency[currency] == address(0)
         ) revert Errors.InitParamsInvalid();
 
         _dataByPublicationByProfile[profileId][pubId].amount = amount;
@@ -219,19 +230,21 @@ contract PoolTogetherCollectModule is FeeModuleBase, FollowValidationModuleBase,
             treasuryAmount = (amount * treasuryFee) / BPS_MAX;
         }
         uint256 adjustedAmount = amount - treasuryAmount;
-
-
-        timestampEligibleForUndelegate[profileId][pubId][collector] = block.timestamp + _dataByPublicationByProfile[profileId][pubId].lockDuration;
-        stakeAmount[profileId][pubId][collector] = adjustedAmount;
         slotByAddress[profileId][pubId][collector] = slotOfDelegation;
 
-        sendToPoolTogether(
-            IPrizePool(prizePoolByCurrency[currency]),
-            _dataByPublicationByProfile[profileId][pubId].recipient,
-            adjustedAmount,
-            collector,
-            _dataByPublicationByProfile[profileId][pubId].lockDuration
-        );
+        // Avoids stack too deep
+        {
+            uint256 lockDuration = _dataByPublicationByProfile[profileId][pubId].lockDuration;
+            timestampEligibleForUndelegate[profileId][pubId][collector] = block.timestamp + lockDuration;
+            stakeAmount[profileId][pubId][collector] = sendToPoolTogether(
+                IPrizePool(prizePoolByCurrency[currency]),
+                IERC20(ticketByCurrency[currency]),
+                _dataByPublicationByProfile[profileId][pubId].recipient,
+                adjustedAmount,
+                collector,
+                lockDuration
+            );
+        }
 
         if (treasuryAmount > 0)
             IERC20(currency).safeTransferFrom(collector, treasury, treasuryAmount);
@@ -271,17 +284,19 @@ contract PoolTogetherCollectModule is FeeModuleBase, FollowValidationModuleBase,
             IERC20(currency).safeTransferFrom(collector, referralRecipient, referralAmount);
         }
 
-        timestampEligibleForUndelegate[profileId][pubId][collector] = block.timestamp + _dataByPublicationByProfile[profileId][pubId].lockDuration;
-        stakeAmount[profileId][pubId][collector] = adjustedAmount;
-        slotByAddress[profileId][pubId][collector] = slotOfDelegation;
-
-        sendToPoolTogether(
-            IPrizePool(prizePoolByCurrency[currency]),
-            _dataByPublicationByProfile[profileId][pubId].recipient,
-            adjustedAmount,
-            collector,
-            _dataByPublicationByProfile[profileId][pubId].lockDuration
-        );
+        // Avoids stack to deep
+        {
+            uint256 lockDuration = _dataByPublicationByProfile[profileId][pubId].lockDuration;
+            timestampEligibleForUndelegate[profileId][pubId][collector] = block.timestamp + lockDuration;
+            stakeAmount[profileId][pubId][collector] = sendToPoolTogether(
+                IPrizePool(prizePoolByCurrency[currency]),
+                IERC20(ticketByCurrency[currency]),
+                _dataByPublicationByProfile[profileId][pubId].recipient,
+                adjustedAmount,
+                collector,
+                lockDuration
+            );
+        }
 
         if (treasuryAmount > 0)
             IERC20(currency).safeTransferFrom(collector, treasury, treasuryAmount);
@@ -297,12 +312,25 @@ contract PoolTogetherCollectModule is FeeModuleBase, FollowValidationModuleBase,
     * @param collector Collector address
     * @param lockDuration Lock duration
     */
-    function sendToPoolTogether(IPrizePool prizePool, address recipient, uint256 adjustedAmount, address collector, uint256 lockDuration) internal {
+    function sendToPoolTogether(
+        IPrizePool prizePool,
+        IERC20 ticket,
+        address recipient,
+        uint256 adjustedAmount,
+        address collector,
+        uint256 lockDuration) internal returns (uint256) {
+        uint256 amountOfTicketBefore = ticket.balanceOf(address(this));
+
         // Deposit amount in PoolTogether
         prizePool.depositTo(recipient, adjustedAmount);
-        // Create delegation of the amount
+        // Create delegation of the amount of ticket
+        uint256 amountOfTicketToDelegate = ticket.balanceOf(address(this)) - amountOfTicketBefore;
         twabDelegator.createDelegation(recipient, slotOfDelegation, collector, lockDuration);
+        // Fund delegation
+        twabDelegator.fundDelegation(recipient, slotOfDelegation, amountOfTicketToDelegate);
         slotOfDelegation++;
+
+        return amountOfTicketToDelegate;
     }
 
     /**
@@ -329,6 +357,17 @@ contract PoolTogetherCollectModule is FeeModuleBase, FollowValidationModuleBase,
     function setPrizePool(address currency, address prizePoolAddress) external onlyGov {
         if (!_currencyWhitelisted(currency)) revert Errors.NotWhitelisted();
         prizePoolByCurrency[currency] = prizePoolAddress;
+    }
+
+    /**
+    * @notice Set a Ticket Address for a currency
+    *
+    * @param currency The currency of the Ticket
+    * @param ticketAddress The address of the Ticket
+    */
+    function setTicket(address currency, address ticketAddress) external onlyGov {
+        if (!_currencyWhitelisted(currency)) revert Errors.NotWhitelisted();
+        ticketByCurrency[currency] = ticketAddress;
     }
 
     function _validateDataIsExpectedPrizePool(

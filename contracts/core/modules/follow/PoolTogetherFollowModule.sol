@@ -42,6 +42,16 @@ interface ITWABDelegator {
         address delegatee,
         uint256 lockDuration) external returns (address);
 
+    // @notice Fund a delegation by transferring tickets from the caller to the delegation
+    // @param delegator Address of the delegator
+    // @param slot Slot of the delegation
+    // @param amount Amount of tickets to fund
+    function fundDelegation(
+        address,
+        uint256,
+        uint256
+    ) external returns (address);
+
     // @notice Withdraw tickets from a delegation.
     // @param delegatorAddress Address of the delegator
     // @param slot Slot of the delegation
@@ -63,16 +73,16 @@ interface IPrizePool {
 }
 
 // New Error
-error NoPrizePool();
-error UndelegateTimeNotReached();
-error NotTheRecipient();
+    error NoPrizePool();
+    error UndelegateTimeNotReached();
+    error NotTheRecipient();
 
 /**
- * @title FeeFollowModule
- * @author Lens Protocol
+ * @title PoolTogetherFollowModule
+ * @author NelsonRodMar.lens
  *
- * @notice This is a simple Lens FollowModule implementation, inheriting from the IFollowModule interface, but with additional
- * variables that can be controlled by governance, such as the governance & treasury addresses as well as the treasury fee.
+ * @notice This is a simple PoolTogether implementation in a FollowModule, inheriting from the IFollowModule interface.
+ *
  */
 contract PoolTogetherFollowModule is FeeModuleBase, ModuleBase, FollowValidatorFollowModuleBase {
     using SafeERC20 for IERC20;
@@ -92,6 +102,8 @@ contract PoolTogetherFollowModule is FeeModuleBase, ModuleBase, FollowValidatorF
     mapping(uint256 => mapping(address => uint256)) public slotByAddress;
     // currency => PrizePool
     mapping(address => address) public prizePoolByCurrency;
+    // currency => ticket
+    mapping(address => address) public ticketByCurrency;
 
     /**
      * @dev This modifier reverts if the caller is not the configured governance address.
@@ -127,7 +139,7 @@ contract PoolTogetherFollowModule is FeeModuleBase, ModuleBase, FollowValidatorF
         address currency,
         address recipient
         ) = abi.decode(data, (uint256, uint256, address, address));
-        if (!_currencyWhitelisted(currency) || recipient == address(0) || amount == 0 || lockDuration == 0  || prizePoolByCurrency[currency] == address(0))
+        if (!_currencyWhitelisted(currency) || recipient == address(0) || amount == 0 || lockDuration == 0 || prizePoolByCurrency[currency] == address(0) || ticketByCurrency[currency] == address(0))
             revert Errors.InitParamsInvalid();
 
         _dataByProfile[profileId].amount = amount;
@@ -158,25 +170,57 @@ contract PoolTogetherFollowModule is FeeModuleBase, ModuleBase, FollowValidatorF
         _validateDataIsExpectedPrizePool(data, currency, amount);
 
         (address treasury, uint16 treasuryFee) = _treasuryData();
-        uint256 lockDuration = _dataByProfile[profileId].lockDuration;
-        address recipient = _dataByProfile[profileId].recipient;
         uint256 treasuryAmount = (amount * treasuryFee) / BPS_MAX;
         uint256 adjustedAmount = amount - treasuryAmount;
 
-        prizePool = IPrizePool(prizePoolByCurrency[currency]);
-        timestampEligibleForUndelegate[profileId][follower] = block.timestamp + lockDuration;
-        stakeAmount[profileId][follower] = adjustedAmount;
-        slotByAddress[profileId][follower] = slotOfDelegation;
-
-        // Deposit amount in PoolTogether
-        prizePool.depositTo(recipient, adjustedAmount);
-        // Create delegation of the amount
-        twabDelegator.createDelegation(recipient, slotOfDelegation, follower, lockDuration);
-        slotOfDelegation++;
+        // Avoids stack too deep
+        {
+            uint256 lockDuration = _dataByProfile[profileId].lockDuration;
+            timestampEligibleForUndelegate[profileId][follower] = block.timestamp + lockDuration;
+            stakeAmount[profileId][follower] = sendToPoolTogether(
+                IPrizePool(prizePoolByCurrency[currency]),
+                IERC20(ticketByCurrency[currency]),
+                _dataByProfile[profileId].recipient,
+                adjustedAmount,
+                follower,
+                lockDuration
+            );
+        }
 
 
         if (treasuryAmount > 0)
             IERC20(currency).safeTransferFrom(follower, treasury, treasuryAmount);
+    }
+
+
+    /**
+    * @notice Send & Delegate the token in PoolTogether
+    *
+    * @param prizePool PrizePool address
+    * @param recipient Recipient address
+    * @param adjustedAmount Amount of token to send
+    * @param follower Follower address
+    * @param lockDuration Lock duration
+    */
+    function sendToPoolTogether(
+        IPrizePool prizePool,
+        IERC20 ticket,
+        address recipient,
+        uint256 adjustedAmount,
+        address follower,
+        uint256 lockDuration) internal returns (uint256) {
+        uint256 amountOfTicketBefore = ticket.balanceOf(address(this));
+
+        // Deposit amount in PoolTogether
+        prizePool.depositTo(recipient, adjustedAmount);
+        // Create delegation of the amount of ticket
+        uint256 amountOfTicketToDelegate = ticket.balanceOf(address(this)) - amountOfTicketBefore;
+        twabDelegator.createDelegation(recipient, slotOfDelegation, follower, lockDuration);
+        // Fund delegation
+        twabDelegator.fundDelegation(recipient, slotOfDelegation, amountOfTicketToDelegate);
+        slotOfDelegation++;
+
+        return amountOfTicketToDelegate;
     }
 
     /**
@@ -187,7 +231,7 @@ contract PoolTogetherFollowModule is FeeModuleBase, ModuleBase, FollowValidatorF
     */
     function undelegateMyToken(uint256 profileId, address[] memory followers) external {
         if (msg.sender != _dataByProfile[profileId].recipient) revert NotTheRecipient();
-        for (uint i=0; i < followers.length; i++) {
+        for (uint i = 0; i < followers.length; i++) {
             if (timestampEligibleForUndelegate[profileId][followers[i]] > block.timestamp) revert UndelegateTimeNotReached();
             twabDelegator.withdrawDelegationToStake(msg.sender, slotByAddress[profileId][followers[i]], stakeAmount[profileId][followers[i]]);
         }
@@ -226,6 +270,17 @@ contract PoolTogetherFollowModule is FeeModuleBase, ModuleBase, FollowValidatorF
         prizePoolByCurrency[currency] = prizePoolAddress;
     }
 
+    /**
+    * @notice Set a Ticket Address for a currency
+    *
+    * @param currency The currency of the Ticket
+    * @param ticketAddress The address of the Ticket
+    */
+    function setTicket(address currency, address ticketAddress) external onlyGov {
+        if (!_currencyWhitelisted(currency)) revert Errors.NotWhitelisted();
+        ticketByCurrency[currency] = ticketAddress;
+    }
+
 
     function _validateDataIsExpectedPrizePool(
         bytes calldata data,
@@ -235,9 +290,9 @@ contract PoolTogetherFollowModule is FeeModuleBase, ModuleBase, FollowValidatorF
         if (decodedCurrency != currency) revert Errors.NotWhitelisted();
         if (prizePoolByCurrency[currency] == address(0)) revert NoPrizePool();
         super._validateDataIsExpected(
-        data,
-        currency,
-        amount);
+            data,
+            currency,
+            amount);
     }
 
     function _validateCallerIsGovernance() internal view {
