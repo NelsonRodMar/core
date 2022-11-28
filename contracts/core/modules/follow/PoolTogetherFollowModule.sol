@@ -85,6 +85,8 @@ interface IPrizePool {
  *
  */
 contract PoolTogetherFollowModule is FeeModuleBase, ModuleBase, FollowValidatorFollowModuleBase {
+    uint256 public constant MAX_LOCK = 180 days;
+
     using SafeERC20 for IERC20;
 
     IPrizePool prizePool;
@@ -139,7 +141,7 @@ contract PoolTogetherFollowModule is FeeModuleBase, ModuleBase, FollowValidatorF
         address currency,
         address recipient
         ) = abi.decode(data, (uint256, uint256, address, address));
-        if (!_currencyWhitelisted(currency) || recipient == address(0) || amount == 0 || lockDuration == 0 || prizePoolByCurrency[currency] == address(0) || ticketByCurrency[currency] == address(0))
+        if (!_currencyWhitelisted(currency) || recipient == address(0) || amount == 0 || lockDuration == 0 || lockDuration >= MAX_LOCK || prizePoolByCurrency[currency] == address(0) || ticketByCurrency[currency] == address(0))
             revert Errors.InitParamsInvalid();
 
         _dataByProfile[profileId].amount = amount;

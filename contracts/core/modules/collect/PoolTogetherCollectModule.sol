@@ -90,6 +90,7 @@ interface IPrizePool {
  *
 */
 contract PoolTogetherCollectModule is FeeModuleBase, FollowValidationModuleBase, ICollectModule {
+    uint256 public constant MAX_LOCK = 180 days;
     using SafeERC20 for IERC20;
 
     IPrizePool prizePool;
@@ -156,6 +157,7 @@ contract PoolTogetherCollectModule is FeeModuleBase, FollowValidationModuleBase,
         referralFee > BPS_MAX ||
         amount == 0 ||
         lockDuration == 0 ||
+        lockDuration >= MAX_LOCK ||
         prizePoolByCurrency[currency] == address(0) ||
         ticketByCurrency[currency] == address(0)
         ) revert Errors.InitParamsInvalid();
