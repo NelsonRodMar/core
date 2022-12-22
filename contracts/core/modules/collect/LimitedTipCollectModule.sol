@@ -14,44 +14,49 @@ import {IERC721} from '@openzeppelin/contracts/token/ERC721/IERC721.sol';
 /**
  * @notice A struct containing the necessary data to execute collect actions on a publication.
  *
+ * @param collectLimit The maximum number of collects for this publication.
+ * @param currentCollects The current number of collects for this publication.
  * @param minAmount The minimum amount of the tip associated with this publication, could be 0.
  * @param currency The currency associated with this publication.
  * @param recipient The recipient address associated with this publication.
  * @param referralFee The referral fee associated with this publication.
  * @param followerOnly Whether only followers should be able to collect.
  */
-    struct ProfilePublicationData {
-        uint256 minAmount;
-        address currency;
-        address recipient;
-        uint16 referralFee;
-        bool followerOnly;
-    }
+struct ProfilePublicationData {
+    uint256 collectLimit;
+    uint256 currentCollects;
+    uint256 minAmount;
+    address currency;
+    address recipient;
+    uint16 referralFee;
+    bool followerOnly;
+}
 
 /**
- * @title TipCollectModule
+ * @title LimitedTipCollectModule
  * @author NelsonRodMar.lens
  *
  * @notice This is a simple Lens CollectModule implementation, inheriting from the ICollectModule interface and
  * the FeeCollectModuleBase abstract contract that let user tip a publication with a minimum amount, this min
  * amount could be zero.
  *
- * This module works by allowing unlimited collects for a publication at a given price.
+ * This module works by allowing limited collects for a publication indefinitely.
  */
-contract TipCollectModule is FeeModuleBase, FollowValidationModuleBase, ICollectModule {
+contract LimitedFeeCollectModule is FeeModuleBase, FollowValidationModuleBase, ICollectModule {
     using SafeERC20 for IERC20;
 
     mapping(uint256 => mapping(uint256 => ProfilePublicationData))
-    internal _dataByPublicationByProfile;
+        internal _dataByPublicationByProfile;
 
     constructor(address hub, address moduleGlobals) FeeModuleBase(moduleGlobals) ModuleBase(hub) {}
 
     /**
-     * @notice This tip collect module levies a fee on collects and supports referrals. Thus, we need to decode data.
+     * @notice This collect module levies a fee on collects and supports referrals. Thus, we need to decode data.
      *
-     * @param profileId The token ID of the profile of the publisher, passed by the hub.
-     * @param pubId The publication ID of the newly created publication, passed by the hub.
+     * @param profileId The profile ID of the publication to initialize this module for's publishing profile.
+     * @param pubId The publication ID of the publication to initialize this module for.
      * @param data The arbitrary data parameter, decoded into:
+     *      uint256 collectLimit: The maximum amount of collects.
      *      uint256 minAmount: The currency minimal amount to levy.
      *      address currency: The currency address, must be internally whitelisted.
      *      address recipient: The custom recipient address to direct earnings to.
@@ -66,18 +71,21 @@ contract TipCollectModule is FeeModuleBase, FollowValidationModuleBase, ICollect
         bytes calldata data
     ) external override onlyHub returns (bytes memory) {
         (
-        uint256 minAmount,
-        address currency,
-        address recipient,
-        uint16 referralFee,
-        bool followerOnly
-        ) = abi.decode(data, (uint256, address, address, uint16, bool));
+            uint256 collectLimit,
+            uint256 minAmount,
+            address currency,
+            address recipient,
+            uint16 referralFee,
+            bool followerOnly
+        ) = abi.decode(data, (uint256, uint256, address, address, uint16, bool));
         if (
+            collectLimit == 0 ||
             !_currencyWhitelisted(currency) ||
             recipient == address(0) ||
             referralFee > BPS_MAX
         ) revert Errors.InitParamsInvalid();
 
+        _dataByPublicationByProfile[profileId][pubId].collectLimit = collectLimit;
         _dataByPublicationByProfile[profileId][pubId].minAmount = minAmount;
         _dataByPublicationByProfile[profileId][pubId].currency = currency;
         _dataByPublicationByProfile[profileId][pubId].recipient = recipient;
@@ -90,7 +98,8 @@ contract TipCollectModule is FeeModuleBase, FollowValidationModuleBase, ICollect
     /**
      * @dev Processes a collect by:
      *  1. Ensuring the collector is a follower
-     *  2. Charging a the tip amount
+     *  2. Ensuring the collect does not pass the collect limit
+     *  3. Charging the tip amount
      */
     function processCollect(
         uint256 referrerProfileId,
@@ -98,13 +107,21 @@ contract TipCollectModule is FeeModuleBase, FollowValidationModuleBase, ICollect
         uint256 profileId,
         uint256 pubId,
         bytes calldata data
-    ) external virtual override onlyHub {
+    ) external override onlyHub {
         if (_dataByPublicationByProfile[profileId][pubId].followerOnly)
             _checkFollowValidity(profileId, collector);
-        if (referrerProfileId == profileId) {
-            _processCollect(collector, profileId, pubId, data);
+        if (
+            _dataByPublicationByProfile[profileId][pubId].currentCollects >=
+            _dataByPublicationByProfile[profileId][pubId].collectLimit
+        ) {
+            revert Errors.MintLimitExceeded();
         } else {
-            _processCollectWithReferral(referrerProfileId, collector, profileId, pubId, data);
+            ++_dataByPublicationByProfile[profileId][pubId].currentCollects;
+            if (referrerProfileId == profileId) {
+                _processCollect(collector, profileId, pubId, data);
+            } else {
+                _processCollectWithReferral(referrerProfileId, collector, profileId, pubId, data);
+            }
         }
     }
 
@@ -118,9 +135,9 @@ contract TipCollectModule is FeeModuleBase, FollowValidationModuleBase, ICollect
      * @return ProfilePublicationData The ProfilePublicationData struct mapped to that publication.
      */
     function getPublicationData(uint256 profileId, uint256 pubId)
-    external
-    view
-    returns (ProfilePublicationData memory)
+        external
+        view
+        returns (ProfilePublicationData memory)
     {
         return _dataByPublicationByProfile[profileId][pubId];
     }

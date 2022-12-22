@@ -16,7 +16,7 @@ import {IERC721} from '@openzeppelin/contracts/token/ERC721/IERC721.sol';
  *
  * @param collectLimit The maximum number of collects for this publication.
  * @param currentCollects The current number of collects for this publication.
- * @param minAmount The minimum amount of the tip associated with this publication.
+ * @param minAmount The minimum amount of the tip associated with this publication, could be 0.
  * @param currency The currency associated with this publication.
  * @param recipient The recipient address associated with this publication.
  * @param referralFee The referral fee associated with this publication.
@@ -39,7 +39,8 @@ struct ProfilePublicationData {
  * @author Lens Protocol
  *
  * @notice This is a simple Lens CollectModule implementation, inheriting from the ICollectModule interface and
- * the FeeCollectModuleBase abstract contract. To optimize on gas, this module uses a constant 24 hour maximum
+ * the FeeCollectModuleBase abstract contract that let user tip a publication with a minimum amount, this min
+ * amount could be zero. To optimize on gas, this module uses a constant 24 hour maximum
  * collection time.
  *
  * This module works by allowing limited collects for a publication within the allotted time with a given fee.
